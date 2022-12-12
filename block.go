@@ -1,8 +1,8 @@
 package main
 
 import (
+	"context"
 	"crypto"
-	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	_ "crypto/sha256"
@@ -14,72 +14,62 @@ import (
 	"time"
 )
 
+// data,hash,previous_hash,timestamp,pow
 type Block struct {
-	priv         *rsa.PrivateKey
-	pub          *rsa.PublicKey
-	data         map[string]interface{}
-	hash         [32]byte
-	salt         *rsa.PSSOptions
-	sign         []byte
-	previousHash [32]byte
-	timestamp    time.Time
-	pow          int
+	data         map[string]interface{} `db:"data"`
+	hash         string                 `db:"hash"`
+	previousHash string                 `db:"previous_hash"`
+	timestamp    time.Time              `db:"timestamp"`
+	pow          int                    `db:"pow"`
+	sign         string
 }
 
 type Blockchain struct {
 	genesisBlock Block
 	chain        []Block
 	difficulty   int
+	db           *Postgres
+	client       Client
 }
 
-func (b Block) signHash(privateKey *rsa.PrivateKey, hashed [32]byte) []byte {
-	newhash := crypto.SHA256
-	fmt.Println(hashed)
-	sign, err := rsa.SignPKCS1v15(rand.Reader, privateKey, newhash, hashed[:])
-
-	if err != nil {
-		fmt.Printf("sign :%s", err)
-		os.Exit(1)
-	}
-	return sign
-
-}
-func (b Block) calculateHash() [32]byte {
+func (b Block) calculateHash() string {
 	data, _ := json.Marshal(b.data)
-	Bdata := fmt.Sprintf("%x", data)
-	blockData := fmt.Sprintf("%x", b.previousHash) + Bdata + b.timestamp.String() + strconv.Itoa(b.pow)
+	blockData := b.previousHash + string(data) + b.timestamp.String() + strconv.Itoa(b.pow)
 	hashed := sha256.Sum256([]byte(blockData))
-
-	return hashed
+	return fmt.Sprintf("%x", hashed)
 }
 
 func (b *Block) mine(privateKey *rsa.PrivateKey, difficulty int) {
-	var hashed [32]byte
-	for !strings.HasPrefix(fmt.Sprintf("%x", b.hash), strings.Repeat("0", difficulty)) {
+
+	for !strings.HasPrefix((b.hash), strings.Repeat("0", difficulty)) {
 		b.pow++
-		hashed = b.calculateHash()
 		b.hash = b.calculateHash()
 	}
-	b.sign = b.signHash(privateKey, hashed)
+
 }
 
-func (b *Block) decrypt() error {
-	return rsa.VerifyPKCS1v15(b.pub, crypto.SHA256, b.hash[:], b.sign)
+func (b *Block) Verify(pub rsa.PublicKey) error {
+	return rsa.VerifyPKCS1v15(&pub, crypto.SHA256, []byte(b.hash), []byte(b.sign))
 }
-
 func (b *Blockchain) addBlock(user User, amount float64) {
+
 	blockData := map[string]interface{}{
 		"amount": amount,
 	}
 	lastBlock := b.chain[len(b.chain)-1]
 	newBlock := Block{
-		priv:         user.Private,
 		data:         blockData,
 		previousHash: lastBlock.hash,
-		timestamp:    time.Now(),
+		timestamp:    time.Now().UTC(),
 		pow:          0,
 	}
 	newBlock.mine(user.Private, b.difficulty)
+	data, _ := json.Marshal(blockData)
+	sign, signTs := b.client.GetSign(newBlock.hash)
+	if err := b.db.SetBlock(context.Background(), string(data), newBlock.hash, newBlock.previousHash, newBlock.timestamp, newBlock.pow, sign, signTs); err != nil {
+		fmt.Println(err)
+		os.Exit(2)
+	}
 	b.chain = append(b.chain, newBlock)
 }
 
@@ -88,15 +78,16 @@ func (b Blockchain) isValid(user User) bool {
 	for i := range b.chain[1:] {
 		previousBlock := b.chain[i]
 		currentBlock := b.chain[i+1]
-		if err := currentBlock.decrypt(); err != nil {
-			fmt.Println(err)
-			fmt.Println("Who are U? Verify Signature failed")
-			os.Exit(1)
-		}
-
-		if currentBlock.hash != currentBlock.calculateHash() || currentBlock.previousHash != previousBlock.hash {
+		if currentBlock.hash != currentBlock.calculateHash() {
+			fmt.Println(currentBlock.calculateHash())
+			fmt.Println(currentBlock.data)
 			return false
 		}
+		if currentBlock.previousHash != previousBlock.hash {
+			fmt.Println("test2")
+			return false
+		}
+
 	}
 	return true
 }
